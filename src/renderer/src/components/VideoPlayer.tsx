@@ -63,6 +63,18 @@ const RECONNECT_MAX_MS = 30_000;
 const RECONNECT_MAX_ATTEMPTS = 8;
 const SWITCH_DEBOUNCE_MS = 200;
 
+const ASPECT_MODES = ["contain", "fill", "16/9", "4/3", "none"] as const;
+const ASPECT_LABELS: Record<string, string> = {
+  contain: "Fit",
+  fill: "Fill",
+  none: "Stretch",
+};
+const OBJECT_FIT: Record<string, string> = {
+  contain: "object-contain",
+  fill: "object-cover",
+  none: "object-fill",
+};
+
 // keeps Electron's window-drag region from swallowing clicks
 const NO_DRAG = { WebkitAppRegion: "no-drag" } as React.CSSProperties;
 
@@ -117,8 +129,7 @@ export function VideoPlayer() {
   const controlsTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const switchDebounce = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pendingChannel = useRef(currentChannel);
-  // CHANGED (hover controls): true while the pointer is on the top/bottom bar
-  const overControls = useRef(false);
+  const overControls = useRef(false); // true while the pointer is on the top/bottom bar
 
   const [status, setStatus] = useState<PlaybackStatus>("idle");
   const [error, setError] = useState<PlayerError | null>(null);
@@ -131,7 +142,7 @@ export function VideoPlayer() {
   const [showAspectMenu, setShowAspectMenu] = useState(false);
   const [reconnectCountdown, setReconnectCountdown] = useState(0);
 
-  // macOS traffic-light buttons sit top-left; leave room so they don't cover the close button
+  // macOS traffic-light buttons sit top-left; leave room so they don't cover the back button
   const isMac = useMemo(() => /Mac/i.test(navigator.platform), []);
 
   // ── Debug overlay (Ctrl+D) ────────────────────────────────────────────────
@@ -142,20 +153,16 @@ export function VideoPlayer() {
     bufferSec: 0,
     bitrate: 0,
     stallCount: 0,
-    droppedFrames: 0,
   });
   const stallCountRef = useRef(0);
 
-  const { volume, muted, aspectMode } = playerSettings;
+  const countStall = useCallback(() => {
+    stallCountRef.current++;
+    setDebugInfo((d) => ({ ...d, stallCount: stallCountRef.current }));
+  }, []);
 
-  const objectFitMap: Record<string, string> = {
-    contain: "object-contain",
-    fill: "object-cover",
-    "16/9": "object-contain",
-    "4/3": "object-contain",
-    none: "object-fill",
-  };
-  const videoClass = objectFitMap[aspectMode] ?? "object-contain";
+  const { volume, muted, aspectMode } = playerSettings;
+  const videoClass = OBJECT_FIT[aspectMode] ?? "object-contain";
 
   // ── Web Audio (volume boost > 100 %) ───────────────────────────────────────
   const ensureAudioContext = useCallback(() => {
@@ -185,6 +192,8 @@ export function VideoPlayer() {
   }, [volume, muted]);
 
   // ── Destroy all engines ───────────────────────────────────────────────────
+  // Note: does NOT reset reconnectAttempts (loadStream calls this on every retry, so
+  // resetting here would defeat the attempt limit). It's reset on channel switch / Retry.
   const destroyAll = useCallback(() => {
     if (hlsRef.current) {
       hlsRef.current.destroy();
@@ -206,9 +215,6 @@ export function VideoPlayer() {
       clearTimeout(reconnectTimer.current);
       reconnectTimer.current = null;
     }
-    // CHANGED: removed `reconnectAttempts.current = 0` here — loadStream calls destroyAll,
-    // so it was resetting the counter on every retry and the 8-attempt limit never hit.
-    // The counter is still reset on channel switch and on the Retry button.
     setReconnectCountdown(0);
   }, []);
 
@@ -234,9 +240,8 @@ export function VideoPlayer() {
   }, []);
 
   // ── Controls auto-hide (hover only) ───────────────────────────────────────
-  // CHANGED: controls are now hidden after CONTROLS_HIDE_MS of no mouse movement in ALL
-  // modes (before: fullscreen only). They stay visible while the pointer is on a control
-  // bar or while the aspect / audio menu is open, and hide when the pointer leaves the player.
+  // Hidden after CONTROLS_HIDE_MS without mouse movement, unless the pointer is on a
+  // control bar or a menu is open. Also hidden when the pointer leaves the player.
   const resetControlsTimer = useCallback(() => {
     setControlsVisible(true);
     if (controlsTimer.current) clearTimeout(controlsTimer.current);
@@ -246,7 +251,7 @@ export function VideoPlayer() {
     }, CONTROLS_HIDE_MS);
   }, [showAspectMenu, showTrackMenu]);
 
-  // CHANGED: also re-show the controls briefly whenever a new channel starts
+  // Also re-show the controls briefly whenever a new channel starts
   useEffect(() => {
     resetControlsTimer();
     return () => {
@@ -278,7 +283,7 @@ export function VideoPlayer() {
         loadStream(url); // eslint-disable-line @typescript-eslint/no-use-before-define
       }, delay);
     },
-    [], // loadStream added below via ref to avoid circular dep
+    [], // loadStream is declared below; it's only referenced when the timer fires
   );
 
   // ── Core stream loader ────────────────────────────────────────────────────
@@ -292,8 +297,7 @@ export function VideoPlayer() {
       destroyAll();
       ensureAudioContext();
 
-      // ── Determine engine: explicit channel override → URL detection ───────
-      // currentChannel.type takes priority over URL heuristics
+      // Engine: explicit channel `type` wins, otherwise URL detection
       const urlDetected: StreamType = detectStreamType(url);
       const engineHint = pendingChannel.current?.type; // 'hls' | 'dash' | 'mpegts' | undefined
       const type: StreamType =
@@ -305,26 +309,19 @@ export function VideoPlayer() {
               ? "ts"
               : urlDetected;
 
-      // ── Inject per-channel headers via X-Custom-* (main process picks them up)
-      // We do this by passing them on every XHR that hls.js / mpegts.js makes.
-      // For native <video> we set them once via a HEAD fetch so the session hook
-      // caches the UA for that host's subsequent requests.
+      // Per-channel headers: sent as X-Custom-* on hls.js XHRs; the main-process session hook applies them
       const ch = pendingChannel.current;
       const customUA = ch?.userAgent ?? null;
       const customReferer = ch?.referer ?? null;
-
-      // Inject into hls.js xhrSetup / p-fetch so the session hook receives them
       const xhrSetup = (xhr: XMLHttpRequest) => {
         if (customUA) xhr.setRequestHeader("X-Custom-UA", customUA);
         if (customReferer)
           xhr.setRequestHeader("X-Custom-Referer", customReferer);
       };
 
-      // CHANGED (muted start): only fall back to muted playback when the browser really
-      // blocks autoplay (NotAllowedError). Other failures (e.g. AbortError when a load
-      // interrupts play()) get a plain retry. Before, ANY failure muted the video while the
-      // store still said "unmuted", so some channels started silent. The `onPlaying`
-      // handler below also re-syncs the mute state with the store.
+      // Only fall back to muted playback when the browser really blocks autoplay;
+      // other failures (e.g. AbortError from an interrupting load) just get a plain retry.
+      // The video's onPlaying handler re-syncs the mute state with the store.
       const safePlay = () => {
         video.play().catch((err) => {
           if (err?.name === "NotAllowedError") video.muted = true;
@@ -334,7 +331,6 @@ export function VideoPlayer() {
         });
       };
 
-      // Update debug info
       setDebugInfo((d) => ({
         ...d,
         engine: engineHint ?? urlDetected,
@@ -351,17 +347,16 @@ export function VideoPlayer() {
           dashRef.current = player;
           player.updateSettings({
             streaming: {
-              // Give the server room to breathe: start with 20 s ahead
               buffer: {
                 bufferTimeAtTopQuality: 20,
                 bufferTimeAtTopQualityLongForm: 30,
                 fastSwitchEnabled: false,
               },
-              // CHANGED: 8 → 30. Play ~30 s behind live (ExoPlayer's default) so
-              // slow segments from this server don't drain the buffer and stall.
+              // Play ~30 s behind live (ExoPlayer's default) so slow segments
+              // from this server don't drain the buffer and stall.
               delay: { liveDelay: 30 },
-              // CHANGED: catch-up off — it changes playback speed to chase latency
-              // and drains the buffer on non-low-latency streams.
+              // Catch-up changes playback speed to chase latency and drains the
+              // buffer on non-low-latency streams.
               liveCatchup: { enabled: false },
               // Higher retry counts for unreliable IPTV servers
               retryAttempts: {
@@ -398,11 +393,9 @@ export function VideoPlayer() {
           });
           player.on(dashjs.MediaPlayer.events.PLAYBACK_WAITING, () => {
             setStatus("buffering");
-            stallCountRef.current++;
-            setDebugInfo((d) => ({ ...d, stallCount: stallCountRef.current }));
+            countStall();
           });
-          // CHANGED: dash.js retries segments itself. Previously ANY error with a code
-          // tore the player down and restarted it; now only manifest-level failures do.
+          // dash.js retries segments itself; only manifest-level failures rebuild the player
           player.on(
             dashjs.MediaPlayer.events.ERROR,
             (e: Record<string, unknown>) => {
@@ -437,16 +430,12 @@ export function VideoPlayer() {
             // lowLatencyMode OFF — these IPTV servers are NOT low-latency;
             // enabling it forces liveSyncDuration to <1 segment → stalls
             lowLatencyMode: false,
-            // Live edge: 3 segments ahead is stable for IPTV servers
             liveSyncDurationCount: 3,
             liveMaxLatencyDurationCount: 8,
-            // Generous buffer: front 30 s, max 60 s
             maxBufferLength: 30,
             maxMaxBufferLength: 60,
-            // Back-buffer: keep 30 s so seeks within live window work
             liveBackBufferLength: 30,
             backBufferLength: 30,
-            // Start at lower ABR level then ramp up
             startLevel: -1, // auto
             capLevelToPlayerSize: true,
             // Retry policy for IPTV servers (slow manifest, segment gaps)
@@ -459,7 +448,6 @@ export function VideoPlayer() {
             fragLoadingMaxRetry: 6,
             fragLoadingRetryDelay: 1000,
             fragLoadingMaxRetryTimeout: 16000,
-            // XHR hook to inject per-channel headers
             xhrSetup,
           });
           hlsRef.current = hls;
@@ -495,7 +483,6 @@ export function VideoPlayer() {
           });
 
           hls.on(Hls.Events.ERROR, (_e, data) => {
-            // CHANGED: log every HLS error so the real cause is visible in DevTools
             console.error(
               "[hls]",
               data.type,
@@ -505,18 +492,11 @@ export function VideoPlayer() {
               data,
             );
             if (!data.fatal) {
-              if (data.details === Hls.ErrorDetails.BUFFER_STALLED_ERROR) {
-                stallCountRef.current++;
-                setDebugInfo((d) => ({
-                  ...d,
-                  stallCount: stallCountRef.current,
-                }));
-                // CHANGED: removed hls.startLoad(-1) here — restarting the load at the
-                // live edge on every stall caused more stalls. hls.js recovers on its own.
-              }
+              // hls.js recovers from stalls on its own — just count them
+              if (data.details === Hls.ErrorDetails.BUFFER_STALLED_ERROR)
+                countStall();
               return;
             }
-            // Fatal errors
             if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
               hls.startLoad();
               scheduleReconnect(url);
@@ -565,9 +545,7 @@ export function VideoPlayer() {
                 isLive: true,
               },
               {
-                // Large stash prevents stutter when a raw-TS server delivers
-                // chunks in bursts (common on cheap IPTV backends).
-                // enableStashBuffer / stashInitialSize live in OptionalConfig (2nd arg).
+                // Large stash prevents stutter when a raw-TS server delivers chunks in bursts
                 enableStashBuffer: true,
                 stashInitialSize: 1024 * 512, // 512 KB
                 // Relaxed latency chasing — avoids buffer underruns on variable servers
@@ -625,7 +603,7 @@ export function VideoPlayer() {
       });
       safePlay();
     },
-    [destroyAll, ensureAudioContext, scheduleReconnect],
+    [destroyAll, ensureAudioContext, scheduleReconnect, countStall],
   );
 
   // ── Debounced channel switch ──────────────────────────────────────────────
@@ -692,7 +670,7 @@ export function VideoPlayer() {
     }
   }, []);
 
-  // jump to the live edge and resume (used after pausing)
+  // Jump to the live edge and resume (used after pausing)
   const goLive = useCallback(() => {
     const video = videoRef.current;
     if (!video) return;
@@ -716,9 +694,8 @@ export function VideoPlayer() {
     setStatus("playing");
   }, []);
 
-  // Fullscreen: ONLY the HTML Fullscreen API. Calling window.api.toggleFullscreen() as well
-  // flipped the Electron window state a second time and fought with the first toggle.
-  // The native window toggle is only a fallback if the HTML request is refused.
+  // HTML Fullscreen API only; the native window toggle is just a fallback if it's refused
+  // (calling both flipped the Electron window state twice and fought itself).
   const toggleFullscreen = useCallback(async () => {
     try {
       if (document.fullscreenElement) {
@@ -861,7 +838,6 @@ export function VideoPlayer() {
 
   if (!currentChannel) return null;
 
-  const isLoading = status === "loading";
   const isReconnecting = status === "reconnecting";
   const isError = status === "error";
 
@@ -871,7 +847,6 @@ export function VideoPlayer() {
       className="fixed inset-0 z-50 bg-black flex flex-col select-none"
       onMouseMove={resetControlsTimer}
       onClick={resetControlsTimer}
-      // CHANGED: hide the controls as soon as the pointer leaves the player
       onMouseLeave={() => {
         overControls.current = false;
         setControlsVisible(false);
@@ -888,16 +863,14 @@ export function VideoPlayer() {
           playsInline
           onWaiting={() => {
             setStatus("buffering");
-            stallCountRef.current++;
-            setDebugInfo((d) => ({ ...d, stallCount: stallCountRef.current }));
+            countStall();
           }}
           onPlaying={() => {
             setStatus("playing");
-            // CHANGED (muted start): re-apply the store's mute state — a fallback inside
-            // safePlay / mpegts may have muted the element while the UI says "unmuted"
+            // Re-apply the store's mute state (a fallback may have muted the element
+            // while the UI says "unmuted") and un-suspend Web Audio (silent audio)
             const v = videoRef.current;
             if (v && v.muted !== muted) v.muted = muted;
-            // …and make sure the Web Audio graph isn't suspended (silent audio)
             if (audioCtxRef.current?.state === "suspended")
               audioCtxRef.current.resume().catch(() => {});
           }}
@@ -924,7 +897,6 @@ export function VideoPlayer() {
         className={`absolute top-0 left-0 right-0 z-10 flex items-center gap-3 px-4 pt-4 pb-10
           bg-gradient-to-b from-black/80 to-transparent transition-opacity duration-300
           ${controlsVisible ? "opacity-100" : "opacity-0 pointer-events-none"}`}
-        // CHANGED: remember when the pointer is on the bar so it doesn't auto-hide under it
         onMouseEnter={() => {
           overControls.current = true;
         }}
@@ -952,7 +924,6 @@ export function VideoPlayer() {
           title="Back (Esc)"
           aria-label="Back"
         >
-          {/* left arrow (back) */}
           <svg
             className="w-5 h-5"
             fill="none"
@@ -1022,7 +993,6 @@ export function VideoPlayer() {
         className={`absolute bottom-0 left-0 right-0 z-10 flex flex-col gap-2 px-4 pb-4 pt-10
           bg-gradient-to-t from-black/80 to-transparent transition-opacity duration-300
           ${controlsVisible ? "opacity-100" : "opacity-0 pointer-events-none"}`}
-        // CHANGED: remember when the pointer is on the bar so it doesn't auto-hide under it
         onMouseEnter={() => {
           overControls.current = true;
         }}
@@ -1089,8 +1059,7 @@ export function VideoPlayer() {
             </span>
           </div>
 
-          {/* LIVE button, right next to the volume slider.
-              Pulsing red "LIVE" while live, "● GO LIVE" when paused. */}
+          {/* LIVE button next to the volume slider: pulsing red "LIVE", or "● GO LIVE" when paused */}
           <button
             onClick={(e) => {
               e.stopPropagation();
@@ -1119,38 +1088,24 @@ export function VideoPlayer() {
               }}
               className="text-white/60 hover:text-white text-xs px-2 py-1 rounded border border-white/20 hover:border-white/40 transition-colors"
             >
-              {aspectMode === "contain"
-                ? "Fit"
-                : aspectMode === "fill"
-                  ? "Fill"
-                  : aspectMode === "none"
-                    ? "Stretch"
-                    : aspectMode}
+              {ASPECT_LABELS[aspectMode] ?? aspectMode}
             </button>
             {showAspectMenu && (
               <div className="absolute bottom-full right-0 mb-2 bg-zinc-900 border border-zinc-700 rounded-lg py-1 w-28 shadow-xl">
-                {(["contain", "fill", "16/9", "4/3", "none"] as const).map(
-                  (m) => (
-                    <button
-                      key={m}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        setAspectMode(m);
-                        setShowAspectMenu(false);
-                      }}
-                      className={`w-full text-left px-3 py-1.5 text-sm transition-colors
+                {ASPECT_MODES.map((m) => (
+                  <button
+                    key={m}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setAspectMode(m);
+                      setShowAspectMenu(false);
+                    }}
+                    className={`w-full text-left px-3 py-1.5 text-sm transition-colors
                       ${aspectMode === m ? "text-red-400" : "text-zinc-300 hover:text-white hover:bg-zinc-800"}`}
-                    >
-                      {m === "contain"
-                        ? "Fit"
-                        : m === "fill"
-                          ? "Fill"
-                          : m === "none"
-                            ? "Stretch"
-                            : m}
-                    </button>
-                  ),
-                )}
+                  >
+                    {ASPECT_LABELS[m] ?? m}
+                  </button>
+                ))}
               </div>
             )}
           </div>
