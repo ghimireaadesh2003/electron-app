@@ -1,19 +1,19 @@
 /**
  * channels.ts — tedeyTV hardcoded channel list
  *
- * Fields:
- *   type    – explicit engine override ('hls' | 'dash' | 'mpegts').
- *             Omit to let streamDetector auto-detect.
- *   headers – per-channel request headers injected by the main-process
- *             session hook (see main/index.ts setupSessionHooks).
- *             Use 'X-UA' to override User-Agent, 'Referer' for Referer.
+ * Per-channel fields:
+ *   type     – engine override: 'hls' | 'dash' | 'mpegts'
+ *              Omit to let streamDetector auto-detect from the URL.
+ *   userAgent – override the default VLC UA for this channel only.
+ *   referer   – Referer header required by some CDNs (e.g. Kantipur TV).
  *
- * DO NOT change any URLs.
+ * To remove a channel, delete its object. Changes here take effect on
+ * next app launch (persisted imports are kept separately).
  */
 import { Channel } from '../types'
 
 export const channels: Channel[] = [
-  // ── DASH streams ──────────────────────────────────────────────────────────
+  // ── HLS — raw-IP servers (202.79.40.x) ───────────────────────────────────
   {
     id: 'ch-1',
     name: 'Kantipur max HD',
@@ -21,9 +21,8 @@ export const channels: Channel[] = [
     url: 'http://202.79.40.247/iptvlivestream/netKANTIPURCINEPLEX1500.stream/chunks.m3u8',
     category: 'Sports',
     isHD: true,
-    type: 'dash'
+    type: 'hls'
   },
-  
   {
     id: 'ch-3',
     name: 'Kantipur max-2 HD',
@@ -31,10 +30,8 @@ export const channels: Channel[] = [
     url: 'http://202.79.40.235/iptvlivestream/KTVMax2HD.stream/chunks.m3u8',
     category: 'Sports',
     isHD: true,
-    type: 'dash'
+    type: 'hls'
   },
-
-  // ── HLS streams (raw-IP servers; VLC-style UA set globally) ───────────────
   {
     id: 'Himalaya Sports HD',
     name: 'Himalaya Sports HD',
@@ -63,7 +60,7 @@ export const channels: Channel[] = [
     type: 'hls'
   },
 
-  // ── HTTPS HLS (needs Referer to avoid 403 from the CDN) ──────────────────
+  // ── HTTPS HLS — CDN with Referer check ───────────────────────────────────
   {
     id: 'kantipur-tv-hd',
     name: 'Kantipur TV (1080p)',
@@ -74,9 +71,11 @@ export const channels: Channel[] = [
     type: 'hls',
     referer: 'https://www.ekantipur.com/'
   },
+
+  // ── DASH — raw-IP IPTV servers (103.154.47.x) ────────────────────────────
   {
     id: 'ch-111',
-    name: 'Kantipur max HD',
+    name: 'Kantipur max HD (DASH)',
     logo: 'https://i.imgur.com/EZUyzhG.jpg',
     url: 'http://103.154.47.133/media/test11.mpd',
     category: 'Sports',
@@ -85,11 +84,11 @@ export const channels: Channel[] = [
   },
   {
     id: 'ch-222',
-    name: 'Kantipur max-2 HD',
+    name: 'Kantipur max-2 HD (DASH)',
     logo: 'https://i.ibb.co/ShK58p6/Kantipur-Max-2-HD.jpg',
     url: 'http://103.154.47.137/media/test60.mpd',
     category: 'Sports',
     isHD: true,
     type: 'dash'
-  },
+  }
 ]

@@ -9,6 +9,7 @@ interface LiveTVState {
   // Channels
   currentChannel: Channel | null
   channels: Channel[]           // built-in + imported, deduplicated
+  importedChannels: Channel[]
   favorites: string[]
   recentlyWatched: Channel[]
 
@@ -55,6 +56,7 @@ export const useLiveTVStore = create<LiveTVState>()(
     (set, get) => ({
       currentChannel: null,
       channels: builtInChannels,
+      importedChannels: [],
       favorites: [],
       recentlyWatched: [],
       searchTerm: '',
@@ -89,17 +91,22 @@ export const useLiveTVStore = create<LiveTVState>()(
       // ── import ────────────────────────────────────────────────────────────
       importChannels: (imported) =>
         set((state) => {
-          // Merge: imported channels replace built-in channels with same id;
-          // newly imported ones are appended after built-in.
+          const newImported = [
+            ...state.importedChannels,
+            ...imported.filter((c) => !state.importedChannels.some((x) => x.id === c.id))
+          ]
           const existingIds = new Set(builtInChannels.map((c) => c.id))
           const merged = [
             ...builtInChannels,
-            ...imported.filter((c) => !existingIds.has(c.id))
+            ...newImported.filter((c) => !existingIds.has(c.id))
           ]
-          return { channels: merged }
+          return {
+            importedChannels: newImported,
+            channels: merged
+          }
         }),
 
-      clearImported: () => set({ channels: builtInChannels }),
+      clearImported: () => set({ importedChannels: [], channels: builtInChannels }),
 
       // ── navigation ────────────────────────────────────────────────────────
       setSearchTerm: (term) => set({ searchTerm: term }),
@@ -132,9 +139,26 @@ export const useLiveTVStore = create<LiveTVState>()(
       partialize: (state) => ({
         favorites: state.favorites,
         recentlyWatched: state.recentlyWatched,
-        channels: state.channels,
+        importedChannels: state.importedChannels,
         playerSettings: state.playerSettings
-      })
+      }),
+      merge: (persistedState: any, currentState) => {
+        const imported: Channel[] = persistedState?.importedChannels || []
+        const existingIds = new Set(builtInChannels.map((c) => c.id))
+        const mergedChannels = [
+          ...builtInChannels,
+          ...imported.filter((c) => !existingIds.has(c.id))
+        ]
+        return {
+          ...currentState,
+          ...persistedState,
+          importedChannels: imported,
+          channels: mergedChannels,
+          recentlyWatched: (persistedState?.recentlyWatched || []).filter((r: Channel) =>
+            mergedChannels.some((c) => c.id === r.id)
+          )
+        }
+      }
     }
   )
 )
